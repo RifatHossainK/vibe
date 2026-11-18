@@ -1,0 +1,14 @@
+# Vibe — Render Blueprint (free tier).
+# Deploy: push this repo to GitHub, then in Render: New → Blueprint → pick the repo.
+# Render reads this file and creates the service below.
+services:
+  - type: web
+    name: vibe
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATA_DIR
+        value: /app/backend/data
