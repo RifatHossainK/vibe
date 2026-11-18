@@ -35,7 +35,15 @@ def get_ice_servers() -> list:
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(_BACKEND_DIR / "data")))
 
-# Upload size caps (bytes)
-MAX_IMAGE_VIDEO_BYTES = 50 * 1024 * 1024  # 50 MB
-MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
+# Media upload cap (bytes): 1 GB for EVERY kind — photo, video, audio,
+# voice. Overridable with MAX_MEDIA_BYTES (bytes) for tests and
+# low-memory deployments. The two legacy names are kept so existing
+# imports keep working; both equal the same 1 GB cap.
+try:
+    MAX_MEDIA_BYTES = int(os.environ.get("MAX_MEDIA_BYTES", 1024 * 1024 * 1024))
+except (TypeError, ValueError):
+    MAX_MEDIA_BYTES = 1024 * 1024 * 1024
+MAX_MEDIA_BYTES = max(0, MAX_MEDIA_BYTES)
+MAX_IMAGE_VIDEO_BYTES = MAX_MEDIA_BYTES
+MAX_AUDIO_BYTES = MAX_MEDIA_BYTES
 MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB (profile pictures)

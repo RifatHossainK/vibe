@@ -1,5 +1,6 @@
 export type WsServerMessage =
   | { type: 'message'; message: import('./api').Message }
+  | { type: 'message_deleted'; conversation_id: number; message_id: number; mode: 'everyone'; message: import('./api').Message }
   | { type: 'typing'; conversation_id: number; user_id: number; typing: boolean }
   | { type: 'presence'; user_id: number; online: boolean }
   | { type: 'read'; conversation_id: number; user_id: number }

@@ -305,6 +305,12 @@ def conversation_messages(
         d = helpers.message_to_dict(db, m, for_admin=True)
         sender = users_by_id.get(m.sender_id)
         d["sender_name"] = sender.display_name if sender else "Unknown"
+        # Who deleted it for everyone (sender or a moderating admin),
+        # resolved to a name so the UI can label it "deleted by admin"
+        # / "deleted by <name>". None when never deleted for everyone.
+        deleted_by_id = getattr(m, "deleted_by", None)
+        deleter = users_by_id.get(deleted_by_id) if deleted_by_id is not None else None
+        d["deleted_by_name"] = deleter.display_name if deleter else None
         out.append(d)
     return out
 
@@ -327,6 +333,7 @@ def list_media(
             {
                 "id": m.id,
                 "kind": _admin_kind(m.kind),
+                "conversation_id": m.conversation_id,
                 "filename": m.media_name,
                 "size_bytes": m.media_size,
                 "sender_name": sender.display_name if sender else "Unknown",
@@ -341,6 +348,9 @@ def list_media(
                 # Expired media still shows in the Library (labelled), the
                 # admin is never blocked from seeing it.
                 "expired": helpers.is_expired(m),
+                # Deleted-for-everyone media still shows (labelled);
+                # delete-for-me does NOT hide anything from the admin.
+                "deleted": helpers.is_deleted_for_everyone(m),
             }
         )
     return out

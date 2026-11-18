@@ -82,6 +82,8 @@ class LastMessageOut(BaseModel):
     created_at: datetime
     expires_at: Optional[datetime] = None
     expired: bool = False
+    deleted: bool = False
+    deleted_for_everyone: bool = False
 
 
 class ConversationOut(BaseModel):
@@ -110,6 +112,8 @@ class MessageOut(BaseModel):
     media_size: Optional[int] = None
     expires_at: Optional[datetime] = None
     expired: bool = False
+    deleted: bool = False
+    deleted_for_everyone: bool = False
     created_at: datetime
     seen_by: list[int] = []
 

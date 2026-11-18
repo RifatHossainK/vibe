@@ -82,6 +82,15 @@ class Message(Base):
     # None = never (timer was off when sent). Messages are NEVER deleted
     # from the database — the admin panel still shows them.
     expires_at = Column(DateTime, nullable=True)
+    # Delete-for-me: JSON array (as text) of user ids for whom this
+    # message is hidden. Delete-for-everyone: 1 = hidden for all
+    # participants (shown as "This message was deleted"). The row is
+    # NEVER removed — the admin panel still shows the full content.
+    deleted_for = Column(Text, default="[]", nullable=False)
+    deleted_for_everyone = Column(Integer, default=0, nullable=False)
+    # User id of whoever deleted the message for everyone (the sender
+    # or an admin doing moderation). NULL = never deleted for everyone.
+    deleted_by = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=_utcnow, index=True, nullable=False)
 
 

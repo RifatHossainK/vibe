@@ -1,10 +1,12 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import helpers, models, schemas
 from ..database import get_db
 from ..security import get_current_user
-from ..ws import broadcast_message, broadcast_read
+from ..ws import broadcast_message, broadcast_message_deleted, broadcast_read
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -218,9 +220,16 @@ def get_messages(
     )
     if before_id is not None:
         query = query.filter(models.Message.id < before_id)
-    msgs = query.order_by(models.Message.id.desc()).limit(limit).all()
+    # Fetch newest-first, drop messages this user deleted for
+    # themselves, then take the page. (Filtering in Python because
+    # deleted_for is a JSON array stored as text; the limit applies
+    # AFTER the filter so a page is never shorted by hidden rows.)
+    # Deleted-for-everyone messages stay in history as placeholders.
+    msgs = query.order_by(models.Message.id.desc()).all()
+    msgs = [m for m in msgs if not helpers.is_deleted_for(m, current_user.id)]
+    msgs = msgs[:limit]
     msgs = list(reversed(msgs))  # chronological, oldest first
-    return [helpers.message_to_dict(db, m) for m in msgs]
+    return [helpers.message_to_dict(db, m, viewer_id=current_user.id) for m in msgs]
 
 
 @router.post("/{conversation_id}/messages", status_code=201)
@@ -253,6 +262,93 @@ async def send_message(
     participant_ids = helpers.get_participant_ids(db, conversation_id)
     await broadcast_message(msg_dict, participant_ids)
     return msg_dict
+
+
+@router.delete("/{conversation_id}/messages/{message_id}")
+async def delete_message(
+    conversation_id: int,
+    message_id: int,
+    mode: str | None = Query(None),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a message, WhatsApp-style.
+
+    mode=me: hidden from the requester's view only; everyone else
+    still sees it. Only a participant may do this (a non-participant
+    admin gets 403 — mode=me is a personal view, not moderation).
+    mode=everyone: hidden for all participants (shown as "This message
+    was deleted") — the sender may do this, and so may an admin
+    (moderation), even when the admin is NOT a participant of the
+    conversation. The row is NEVER removed from the database: the
+    admin panel still shows the full original content/media, labelled
+    with who deleted it (deleted_by). Call-history lines (kind="call")
+    cannot be deleted. Idempotent: deleting an already deleted message
+    again returns ok.
+    """
+    if mode is None:
+        raise HTTPException(status_code=422, detail="mode query param is required (me or everyone)")
+    if mode not in ("me", "everyone"):
+        raise HTTPException(status_code=400, detail="mode must be 'me' or 'everyone'")
+    # Conversation must exist first (404), whatever the requester's
+    # membership — an admin moderating a conversation they are not in
+    # still needs it to exist.
+    conv = (
+        db.query(models.Conversation)
+        .filter(models.Conversation.id == conversation_id)
+        .first()
+    )
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msg = (
+        db.query(models.Message)
+        .filter(
+            models.Message.id == message_id,
+            models.Message.conversation_id == conversation_id,
+        )
+        .first()
+    )
+    if msg is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if msg.kind == "call":
+        raise HTTPException(status_code=400, detail="Call history cannot be deleted")
+    if mode == "me":
+        # Personal view only: the requester must be a participant.
+        if not helpers.is_participant(db, conversation_id, current_user.id):
+            raise HTTPException(
+                status_code=403, detail="Not a participant of this conversation"
+            )
+    else:
+        # mode == "everyone": the sender, or an admin (moderation —
+        # even when the admin is not a participant). Anyone else 403.
+        if msg.sender_id != current_user.id and current_user.role != "admin":
+            raise HTTPException(
+                status_code=403, detail="Only the sender or an admin can delete a message for everyone"
+            )
+
+    if mode == "me":
+        # Delete-for-me on an already deleted-for-everyone message
+        # still works (it is already a placeholder for everyone; the
+        # requester is just recorded as having deleted it too).
+        deleted_for = helpers.deleted_for_ids(msg)
+        if current_user.id not in deleted_for:
+            deleted_for.append(current_user.id)
+            msg.deleted_for = json.dumps(deleted_for)
+            db.commit()
+        return {"ok": True, "message_id": msg.id, "mode": "me", "message": None}
+
+    # mode == "everyone": sender or admin (checked above). Idempotent —
+    # setting the flag again is a no-op that still returns ok. Record
+    # who deleted it, so the admin panel can label it "deleted by
+    # admin" / "deleted by <name>".
+    msg.deleted_for_everyone = 1
+    msg.deleted_by = current_user.id
+    db.commit()
+    db.refresh(msg)
+    msg_dict = helpers.message_to_dict(db, msg)
+    participant_ids = helpers.get_participant_ids(db, conversation_id)
+    await broadcast_message_deleted(conversation_id, msg.id, msg_dict, participant_ids)
+    return {"ok": True, "message_id": msg.id, "mode": "everyone", "message": msg_dict}
 
 
 @router.patch("/{conversation_id}/disappearing")
@@ -307,8 +403,15 @@ def list_media(
         .all()
     )
     # Expired media is gone from the chat album (admin still sees it in
-    # the Media Library).
-    msgs = [m for m in msgs if not helpers.is_expired(m)]
+    # the Media Library). Deleted media is gone too: deleted-for-me
+    # hides it from that user, deleted-for-everyone hides it from all.
+    msgs = [
+        m
+        for m in msgs
+        if not helpers.is_expired(m)
+        and not helpers.is_deleted_for_everyone(m)
+        and not helpers.is_deleted_for(m, current_user.id)
+    ]
     return [
         {
             "id": m.id,

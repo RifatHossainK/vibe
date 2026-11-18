@@ -62,6 +62,16 @@ def ensure_schema():
     with engine.begin() as conn:
         if "expires_at" not in msg_cols:
             conn.execute(text("ALTER TABLE messages ADD COLUMN expires_at DATETIME"))
+        if "deleted_for" not in msg_cols:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN deleted_for TEXT NOT NULL DEFAULT '[]'")
+            )
+        if "deleted_for_everyone" not in msg_cols:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN deleted_for_everyone INTEGER NOT NULL DEFAULT 0")
+            )
+        if "deleted_by" not in msg_cols:
+            conn.execute(text("ALTER TABLE messages ADD COLUMN deleted_by INTEGER"))
 
     # Backfill usernames for rows that have none.
     # Local import: helpers imports models, which imports this module.

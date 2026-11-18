@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import type { Conversation, Message } from '@/lib/api';
-import { listMessages, sendText, setDisappearing, uploadFile } from '@/lib/api';
+import { deleteMessage, listMessages, sendText, setDisappearing, uploadFile } from '@/lib/api';
+import type { DeleteMode } from './MessageBubble';
 import Avatar from './Avatar';
 import MessageBubble from './MessageBubble';
 import MediaPanel from './MediaPanel';
@@ -23,7 +24,7 @@ function formatTimer(seconds: number): string {
 
 const TIMER_PRESETS = [0, 10, 30, 60, 300];
 
-export default function ChatWindow({ conversation, currentUserId, messages, setMessages, online, typing, onTyping, onSendRead, onBack, onConversationUpdated, onStartCall, onLeaveGroup }: {
+export default function ChatWindow({ conversation, currentUserId, messages, setMessages, online, typing, onTyping, onSendRead, onBack, onConversationUpdated, onStartCall, onLeaveGroup, onMessageDeleted, isAdmin }: {
   conversation: Conversation;
   currentUserId: number;
   messages: Message[];
@@ -36,6 +37,10 @@ export default function ChatWindow({ conversation, currentUserId, messages, setM
   onConversationUpdated?: (conv: Conversation) => void;
   onStartCall?: (type: CallType) => void;
   onLeaveGroup?: () => void;
+  /** Fired after a successful delete so the parent can refresh the list preview. */
+  onMessageDeleted?: (conversationId: number, message: Message | null) => void;
+  /** Admins may delete ANY message for everyone (moderation). */
+  isAdmin?: boolean;
 }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
@@ -160,10 +165,44 @@ export default function ChatWindow({ conversation, currentUserId, messages, setM
     }
   }
 
+  async function handleDelete(messageId: number, mode: DeleteMode) {
+    setError('');
+    try {
+      const res = await deleteMessage(conversation.id, messageId, mode);
+      if (mode === 'me') {
+        // Gone from my view only; the server filters it on reload.
+        setMessages((prev) => prev.filter((m) => m.id !== messageId));
+        onMessageDeleted?.(conversation.id, null);
+      } else {
+        // Replace with the deleted placeholder the server returned.
+        const placeholder = res.message ?? {
+          id: messageId,
+          conversation_id: conversation.id,
+          sender_id: currentUserId,
+          kind: 'text' as const,
+          content: null,
+          media_url: null,
+          media_name: null,
+          media_size: null,
+          expires_at: null,
+          expired: false,
+          deleted: true,
+          deleted_for_everyone: true,
+          created_at: new Date().toISOString(),
+          seen_by: [],
+        };
+        setMessages((prev) => prev.map((m) => (m.id === messageId ? placeholder : m)));
+        onMessageDeleted?.(conversation.id, placeholder);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete message');
+    }
+  }
+
   async function handleFile(file: File) {
     const kind = inferKind(file);
-    const limit = kind === 'audio' ? 25 * 1024 * 1024 : 50 * 1024 * 1024;
-    if (file.size > limit) { setError(`File too large — max ${kind === 'audio' ? '25' : '50'} MB.`); return; }
+    const limit = 1024 * 1024 * 1024; // 1 GB cap for all media types
+    if (file.size > limit) { setError('File too large — max 1 GB.'); return; }
     setUploading(true);
     setError('');
     try {
@@ -260,7 +299,9 @@ export default function ChatWindow({ conversation, currentUserId, messages, setM
                 return (
                   <MessageBubble key={m.id} message={m} isOwn={m.sender_id === currentUserId} isLastOwn={lastOwn?.id === m.id}
                     otherUserId={other?.id ?? -1} otherDisplayName={other?.display_name} otherAvatarUrl={other?.avatar_url}
-                    senderDisplayName={sender?.display_name} senderAvatarUrl={sender?.avatar_url} showSenderName={isGroup} />
+                    senderDisplayName={sender?.display_name} senderAvatarUrl={sender?.avatar_url} showSenderName={isGroup}
+                    isAdmin={isAdmin}
+                    onDelete={handleDelete} />
                 );
               })}
             </div>

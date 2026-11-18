@@ -145,6 +145,30 @@ export default function ChatPage() {
             ws.send('read', { conversation_id: m.conversation_id });
           }
         }
+      } else if (msg.type === 'message_deleted') {
+        // Someone deleted a message for everyone: swap it for the
+        // placeholder the server sent — no refresh needed, open chat or not.
+        const placeholder = msg.message;
+        const open = selectedRef.current;
+        if (open && msg.conversation_id === open.id) {
+          setMessages((prev) => prev.map((m) => (m.id === msg.message_id ? placeholder : m)));
+        }
+        setConversations((prev) => prev.map((c) => {
+          if (c.id !== msg.conversation_id) return c;
+          if (c.last_message?.id !== msg.message_id) return c;
+          return {
+            ...c,
+            last_message: {
+              id: placeholder.id,
+              sender_id: placeholder.sender_id,
+              kind: placeholder.kind,
+              content: null,
+              created_at: placeholder.created_at,
+              deleted: true,
+              deleted_for_everyone: true,
+            },
+          };
+        }));
       } else if (msg.type === 'typing') {
         if (selectedRef.current?.id === msg.conversation_id && msg.user_id !== u.id) {
           setTypingUser(msg.typing ? { conversationId: msg.conversation_id, userId: msg.user_id } : null);
@@ -312,6 +336,12 @@ export default function ChatPage() {
     listConversations().then(setConversations).catch(() => undefined);
   }, [appendMessage]);
 
+  // A message was deleted from the open chat (either mode): the list
+  // preview may now point at a message I no longer see — refetch it.
+  const handleMessageDeleted = useCallback(() => {
+    listConversations().then(setConversations).catch(() => undefined);
+  }, []);
+
   if (!user) {
     return <main className="flex min-h-screen items-center justify-center bg-zinc-950"><p className="text-zinc-400">Loading Vibe…</p></main>;
   }
@@ -335,7 +365,8 @@ export default function ChatPage() {
             online={selectedOnline}
             typing={!!selectedTyping} onTyping={handleTyping} onSendRead={handleSendRead}
             onBack={() => setSelected(null)} onConversationUpdated={handleConversationUpdated}
-            onStartCall={handleStartCall} onLeaveGroup={handleLeaveGroup} />
+            onStartCall={handleStartCall} onLeaveGroup={handleLeaveGroup} onMessageDeleted={handleMessageDeleted}
+            isAdmin={user.role === 'admin'} />
         ) : (
           <div className="hidden flex-1 flex-col items-center justify-center bg-zinc-950 md:flex">
             <p className="text-4xl font-bold text-brand-500">Vibe</p>

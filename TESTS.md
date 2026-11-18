@@ -160,6 +160,38 @@ search by the backfilled username finds the user.
 Both suites re-run unmodified on fresh DBs after all changes — no
 Phase 1 or Admin feature broke.
 
+## Message delete (admin moderation) + 1 GB streaming uploads — backend: test_delete.py PASS
+
+- **Admin delete for everyone:** an admin can delete ANY user's message
+  (text or media) for everyone — including in a conversation they are not
+  a participant of. Participants see the "This message was deleted"
+  placeholder (history, chat-list preview, album) and the media becomes
+  undownloadable for them; `message_deleted` reaches participants over WS.
+  The admin panel still shows the full original content/media, labelled
+  with `deleted_by` (user id) and `deleted_by_name` (e.g. "deleted by
+  admin"). Regular users can still only delete-for-everyone their OWN
+  messages (403 otherwise), and admin `mode=me` on a conversation they
+  are not in → 403. `deleted_by` is set on every successful
+  delete-for-everyone (sender or admin) and stays null otherwise;
+  participant views never include it. Admin Media Library items include
+  `conversation_id`, so the frontend can call the DELETE endpoint from a
+  Library item.
+- **1 GB media uploads, streamed:** the upload cap is **1 GB for ALL
+  media types** (photo, video, audio, voice — `MAX_MEDIA_BYTES` in
+  `backend/app/config.py`, overridable with the `MAX_MEDIA_BYTES` env
+  var). Uploads stream to disk in 1 MB chunks and are never held in
+  memory; past the cap the upload aborts, the partial file is deleted,
+  and the client gets a clear 400 ("File too large (max 1 GB)").
+  `media_size` is the counted byte total. Downloads stream via Starlette
+  `FileResponse` (verified — no read-into-memory path).
+- **Test coverage:** a 120 MB video generated on disk in chunks, uploaded
+  via streaming multipart → 201 with `media_size` == 120 MiB, then
+  streamed back and byte-counted (== 120 MiB). The over-limit guard is
+  exercised without sending a real 1 GB file: a second server started
+  with `MAX_MEDIA_BYTES=5 MB` rejects a 6 MB upload with 400 ("File too
+  large (max 5 MB)"), leaves no partial file and creates no message,
+  while a 4 MB upload under the cap succeeds.
+
 ## Frontend — close fix + profile + disappearing: build + typecheck PASS
 
 - `npx tsc --noEmit` — exit 0, no type errors.

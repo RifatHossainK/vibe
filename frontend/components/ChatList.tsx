@@ -77,11 +77,12 @@ export default function ChatList({ conversations, selectedId, onlineMap, current
           const online = !isGroup && (onlineMap[c.other_user!.id] ?? false);
           const last = c.last_message;
           let snippet = !last ? 'No messages yet'
+            : last.deleted ? '🚫 This message was deleted'
             : last.expired ? '⏱ This message disappeared'
             : last.kind === 'text' ? (last.content ?? '')
             : last.kind === 'image' ? '📷 Photo' : last.kind === 'video' ? '🎬 Video' : last.kind === 'voice' ? '🎙️ Voice message' : last.kind === 'call' ? (last.content ?? '📞 Call') : '🔊 Audio';
           // Group preview: prefix the sender's display name.
-          if (isGroup && last && !last.expired) {
+          if (isGroup && last && !last.expired && !last.deleted) {
             const sender = (c.participants ?? []).find((p) => p.id === last.sender_id);
             if (sender) snippet = `${sender.display_name}: ${snippet}`;
           }

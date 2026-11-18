@@ -28,8 +28,18 @@ export interface Message {
   media_size: number | null;
   expires_at: string | null;
   expired: boolean;
+  /** True when the message was deleted for everyone (content is stripped). */
+  deleted?: boolean;
+  deleted_for_everyone?: boolean;
   created_at: string;
   seen_by: number[];
+}
+export interface DeleteMessageResponse {
+  ok: boolean;
+  message_id: number;
+  mode: 'me' | 'everyone';
+  /** Deleted-placeholder dict for mode=everyone; null for mode=me. */
+  message: Message | null;
 }
 export interface Conversation {
   id: number;
@@ -47,6 +57,8 @@ export interface Conversation {
     created_at: string;
     expires_at?: string | null;
     expired?: boolean;
+    deleted?: boolean;
+    deleted_for_everyone?: boolean;
   } | null;
   last_message_at: string | null;
   unread_count: number;
@@ -163,6 +175,11 @@ export async function sendText(conversationId: number, content: string): Promise
     body: JSON.stringify({ kind: 'text', content }),
   });
 }
+export async function deleteMessage(conversationId: number, messageId: number, mode: 'me' | 'everyone'): Promise<DeleteMessageResponse> {
+  return request<DeleteMessageResponse>(`/api/conversations/${conversationId}/messages/${messageId}?mode=${mode}`, {
+    method: 'DELETE',
+  });
+}
 export async function markRead(conversationId: number): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/conversations/${conversationId}/read`, { method: 'POST' });
 }
@@ -242,6 +259,15 @@ export interface AdminMessage {
   media_size: number | null;
   expires_at?: string | null;
   expired: boolean;
+  /** True when deleted for everyone (admin still sees the full content). */
+  deleted?: boolean;
+  deleted_for_everyone?: boolean;
+  /** Id of the user who deleted this message for everyone (null if unknown). */
+  deleted_by?: number | null;
+  /** Display name of the user who deleted this message for everyone. */
+  deleted_by_name?: string | null;
+  /** User ids who deleted this message for themselves only. */
+  deleted_for?: number[];
   created_at: string;
 }
 export type AdminMediaKind = 'all' | 'photo' | 'video' | 'audio';
@@ -252,10 +278,13 @@ export interface AdminMediaItem {
   size_bytes: number;
   sender_name: string;
   sender_email: string;
+  conversation_id?: number | null;
   conversation_participants: string[];
   created_at: string;
   download_url: string;
   expired: boolean;
+  /** True when the underlying message was deleted (admin can still view/download). */
+  deleted?: boolean;
 }
 export async function getAdminStats(): Promise<AdminStats> {
   return request<AdminStats>('/api/admin/stats');

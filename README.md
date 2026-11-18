@@ -40,8 +40,12 @@ group chats.**
   Messages sent while the timer is off never disappear.
 - **Media messages** — send photos (preview in chat), videos (playable),
   audio files, and voice messages (record in the browser, playable).
-  Caps: photo/video 50 MB, audio/voice 25 MB. Files are validated
-  server-side (type + size) and stored on disk.
+  Caps: 1 GB for all media types (photo, video, audio, voice). Files are validated
+  server-side (type + size) and stored on disk. Uploads stream to disk in
+  1 MB chunks and are never held in memory (a 1 GB upload would otherwise
+  exhaust a small instance's RAM); past the cap the upload aborts, the
+  partial file is deleted, and the client gets a clear 400. Downloads
+  stream via `FileResponse`.
 - **Media panel** — per conversation, a "Media" panel lists every shared
   photo, video, and audio file (album grid + audio list with play buttons).
 - **Admin dashboard** — the first registered user (admin) sees everything:
@@ -50,14 +54,19 @@ group chats.**
   feed (who registered, who messaged whom, who sent what), all
   conversations with a read-only message view, and a central Media Library
   with every photo/video/audio from every conversation (filters, viewer,
-  per-item download, Download-all ZIP). Admin is **read-only** — the admin
-  can never send, edit, or delete other users' messages. Open it from the
+  per-item download, Download-all ZIP). The admin can never send or edit
+  messages — the only write action is deleting a message for everyone
+  (moderation, see below). Open it from the
   🛡 Admin button in the chat sidebar (admin users only) or at `/admin`.
   Group chats appear in the admin conversation list (with name + member
   count) and are readable like any other conversation; call-history lines
   ("📞 Missed audio call", "📹 Video call · 2:34") show in the read-only
   view. Call-history lines are NOT counted as media and never appear in
-  the Media Library.
+  the Media Library. The admin can also **delete any user's message for
+  everyone** (moderation, from the conversation view or the Media Library)
+  — participants then see "This message was deleted" — but the admin can
+  never send or edit messages, and the deleted content stays visible in
+  the admin panel, labelled with who deleted it.
 - **UI** — Messenger-style: left chat list, right conversation, dark theme,
   responsive (mobile shows the list first, then the conversation).
 

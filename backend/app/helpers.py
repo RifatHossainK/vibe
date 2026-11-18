@@ -4,6 +4,7 @@ Kept in one place so ws.py and routers/conversations.py never import each
 other (which would be a circular import).
 """
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -146,7 +147,39 @@ def get_other_user(db: Session, conversation_id: int, user_id: int):
     return db.query(models.User).filter(models.User.id == row.user_id).first()
 
 
-def message_to_dict(db: Session, msg: models.Message, for_admin: bool = False) -> dict:
+def deleted_for_ids(msg) -> list[int]:
+    """User ids that deleted this message for themselves only.
+
+    Stored as a JSON array in msg.deleted_for ("[]"). Tolerant of a
+    missing column on very old rows and of malformed values.
+    """
+    raw = getattr(msg, "deleted_for", None)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out = []
+    for v in parsed:
+        try:
+            out.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def is_deleted_for(msg, user_id: int) -> bool:
+    return user_id in deleted_for_ids(msg)
+
+
+def is_deleted_for_everyone(msg) -> bool:
+    return bool(getattr(msg, "deleted_for_everyone", 0) or 0)
+
+
+def message_to_dict(db: Session, msg: models.Message, for_admin: bool = False, viewer_id: int | None = None) -> dict:
     read_rows = (
         db.query(models.MessageRead)
         .filter(models.MessageRead.message_id == msg.id)
@@ -156,6 +189,8 @@ def message_to_dict(db: Session, msg: models.Message, for_admin: bool = False) -
     # Deduplicate, keep sender first.
     seen_by = list(dict.fromkeys(seen_by))
     expired = is_expired(msg)
+    deleted_everyone = is_deleted_for_everyone(msg)
+    deleted_for = deleted_for_ids(msg)
     # Participants never receive an expired message's content or media —
     # it is stripped here (and the media download is blocked too). The
     # admin sees the full message with expired: true.
@@ -168,7 +203,17 @@ def message_to_dict(db: Session, msg: models.Message, for_admin: bool = False) -
         media_url = None
         media_name = None
         media_size = None
-    return {
+    # A message deleted for everyone shows as a placeholder to
+    # participants (content/media stripped, kind kept) — same stripping
+    # pattern as expired messages. A message can be both expired and
+    # deleted; both flags stay true. The admin always sees the full
+    # original content/media.
+    if deleted_everyone and not for_admin:
+        content = None
+        media_url = None
+        media_name = None
+        media_size = None
+    result = {
         "id": msg.id,
         "conversation_id": msg.conversation_id,
         "sender_id": msg.sender_id,
@@ -179,11 +224,22 @@ def message_to_dict(db: Session, msg: models.Message, for_admin: bool = False) -
         "media_size": media_size,
         "expires_at": msg.expires_at.isoformat() if msg.expires_at else None,
         "expired": expired,
+        "deleted": deleted_everyone,
+        "deleted_for_everyone": deleted_everyone,
         # ISO strings (not datetime objects) so the dict is JSON-safe for
         # WebSocket send_json as well as plain JSONResponse.
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
         "seen_by": seen_by,
     }
+    if for_admin:
+        # Admin retention: full original content/media above, plus the
+        # delete state so the UI can label the message "deleted".
+        # Delete-for-me does NOT hide anything from the admin.
+        result["deleted_for"] = deleted_for
+        # Who deleted it for everyone (sender or a moderating admin);
+        # None when it was never deleted for everyone.
+        result["deleted_by"] = getattr(msg, "deleted_by", None)
+    return result
 
 
 def last_message_for(db: Session, conversation_id: int):
@@ -193,6 +249,23 @@ def last_message_for(db: Session, conversation_id: int):
         .order_by(models.Message.id.desc())
         .first()
     )
+
+
+def last_visible_message_for(db: Session, conversation_id: int, user_id: int):
+    """Latest message visible to this user: messages they deleted for
+    themselves are skipped. A message deleted for everyone still
+    counts — it shows as the deleted placeholder in the preview."""
+    msgs = (
+        db.query(models.Message)
+        .filter(models.Message.conversation_id == conversation_id)
+        .order_by(models.Message.id.desc())
+        .all()
+    )
+    for m in msgs:
+        if is_deleted_for(m, user_id):
+            continue
+        return m
+    return None
 
 
 def unread_count(db: Session, conversation_id: int, user_id: int) -> int:
@@ -211,7 +284,16 @@ def unread_count(db: Session, conversation_id: int, user_id: int) -> int:
         .all()
     )
     # Expired messages are gone from the chat, so they are not unread.
-    return sum(1 for m in msgs if m.id not in read_ids and not is_expired(m))
+    # Deleted messages are not unread either: deleted-for-everyone is
+    # gone for all, deleted-for-me is gone for this viewer.
+    return sum(
+        1
+        for m in msgs
+        if m.id not in read_ids
+        and not is_expired(m)
+        and not is_deleted_for_everyone(m)
+        and not is_deleted_for(m, user_id)
+    )
 
 
 def conversation_to_dict(db: Session, conv: models.Conversation, user_id: int) -> dict:
@@ -231,20 +313,24 @@ def conversation_to_dict(db: Session, conv: models.Conversation, user_id: int) -
         u = db.query(models.User).filter(models.User.id == row.user_id).first()
         if u is not None:
             participants.append(user_public_dict(u))
-    last = last_message_for(db, conv.id)
+    last = last_visible_message_for(db, conv.id, user_id)
     last_message = None
     last_message_at = None
     if last is not None:
         expired = is_expired(last)
+        deleted_everyone = is_deleted_for_everyone(last)
         last_message = {
             "id": last.id,
             "sender_id": last.sender_id,
             "kind": last.kind,
-            # Never leak an expired message's content in the list preview.
-            "content": None if expired else last.content,
+            # Never leak an expired or deleted-for-everyone message's
+            # content in the list preview.
+            "content": None if (expired or deleted_everyone) else last.content,
             "created_at": last.created_at.isoformat() if last.created_at else None,
             "expires_at": last.expires_at.isoformat() if last.expires_at else None,
             "expired": expired,
+            "deleted": deleted_everyone,
+            "deleted_for_everyone": deleted_everyone,
         }
         last_message_at = last.created_at.isoformat() if last.created_at else None
     return {

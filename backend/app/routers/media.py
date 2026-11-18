@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import helpers, models
-from ..config import DATA_DIR, MAX_AUDIO_BYTES, MAX_IMAGE_VIDEO_BYTES
+from ..config import DATA_DIR, MAX_MEDIA_BYTES
 from ..database import get_db
 from ..security import decode_token, get_current_user
 from ..ws import broadcast_message
@@ -100,20 +100,41 @@ async def upload_media(
     else:
         kind = inferred
 
-    cap = MAX_AUDIO_BYTES if kind in ("audio", "voice") else MAX_IMAGE_VIDEO_BYTES
-    data = await file.read()
-    if len(data) > cap:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large (max {cap // (1024 * 1024)} MB)",
-        )
+    # One 1 GB cap for every kind (photo, video, audio, voice).
+    cap = MAX_MEDIA_BYTES
 
     safe_name = sanitize_filename(file.filename or "file")
     unique_name = f"{uuid.uuid4().hex}_{safe_name}"
     dest_dir = DATA_DIR / "uploads" / str(conversation_id)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / unique_name
-    dest_path.write_bytes(data)
+    # Stream the body to disk in 1 MB chunks — NEVER hold the whole
+    # file in memory (the old `await file.read()` loaded it all, which
+    # would exhaust the Render free instance's RAM on a 1 GB upload
+    # and crash the service). Count bytes as they land; if the total
+    # passes the cap, abort, delete the partial file, and 400.
+    total = 0
+    too_large = False
+    try:
+        with dest_path.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > cap:
+                    too_large = True
+                    break
+                out.write(chunk)
+    finally:
+        await file.close()
+    if too_large:
+        dest_path.unlink(missing_ok=True)
+        cap_label = "1 GB" if cap >= 1024 * 1024 * 1024 else f"{cap // (1024 * 1024)} MB"
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large (max {cap_label})",
+        )
 
     from ..models import _utcnow
 
@@ -124,7 +145,7 @@ async def upload_media(
         kind=kind,
         content=None,
         media_name=safe_name,
-        media_size=len(data),
+        media_size=total,
         file_path=str(dest_path),
         expires_at=helpers.expires_at_for(conv, now),
         created_at=now,
@@ -163,6 +184,14 @@ async def download_media(
     msg = db.query(models.Message).filter(models.Message.id == message_id).first()
     if msg is None or not msg.media_url:
         raise HTTPException(status_code=404, detail="Media not found")
+    # A deleted message's media is gone for participants: deleted for
+    # everyone blocks all participants; deleted for me blocks that
+    # user. Admins may still download it (Media Library / audit).
+    if user.role != "admin":
+        if helpers.is_deleted_for_everyone(msg):
+            raise HTTPException(status_code=404, detail="Media not found")
+        if helpers.is_deleted_for(msg, user.id):
+            raise HTTPException(status_code=404, detail="Media not found")
     # An expired disappearing message's media is gone for participants.
     # Admins may still download it (Media Library / audit).
     if helpers.is_expired(msg) and user.role != "admin":

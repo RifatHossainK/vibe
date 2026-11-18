@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { getToken } from '@/lib/auth';
 import {
   adminExportUrl,
+  deleteMessage,
   getAdminActivity,
   getAdminConversationMessages,
   getAdminConversations,
@@ -21,6 +22,7 @@ import {
   type AdminStats,
   type AdminUser,
 } from '@/lib/api';
+import { canDeleteAdminMedia, deletedForEveryoneLabel } from '@/lib/adminDelete';
 import { formatBytes, formatMessageTime, formatTime } from '@/lib/format';
 import Avatar from '@/components/Avatar';
 
@@ -73,6 +75,12 @@ export default function AdminPage() {
   const [convMessages, setConvMessages] = useState<AdminMessage[]>([]);
   const [convLoading, setConvLoading] = useState(false);
   const [convError, setConvError] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [deleteError, setDeleteError] = useState('');
+  const [confirmDeleteMediaId, setConfirmDeleteMediaId] = useState<number | null>(null);
+  const [deletingMediaId, setDeletingMediaId] = useState<number | null>(null);
+  const [mediaDeleteError, setMediaDeleteError] = useState('');
   const [viewer, setViewer] = useState<AdminMediaItem | null>(null);
 
   const loadDashboard = useCallback(async () => {
@@ -143,11 +151,9 @@ export default function AdminPage() {
     return () => clearInterval(id);
   }, [status, loadDashboard, loadMedia]);
 
-  async function openConversation(conv: AdminConversation) {
-    setSelectedConv(conv);
-    setConvMessages([]);
-    setConvError('');
+  const loadConvMessages = useCallback(async (conv: AdminConversation) => {
     setConvLoading(true);
+    setConvError('');
     try {
       const msgs = await getAdminConversationMessages(conv.id, 100);
       setConvMessages([...msgs].sort((a, b) => a.created_at.localeCompare(b.created_at)));
@@ -156,6 +162,53 @@ export default function AdminPage() {
       else setConvError(err instanceof Error ? err.message : 'Could not load messages.');
     } finally {
       setConvLoading(false);
+    }
+  }, []);
+
+  async function openConversation(conv: AdminConversation) {
+    setSelectedConv(conv);
+    setConvMessages([]);
+    setConfirmDeleteId(null);
+    setDeleteError('');
+    await loadConvMessages(conv);
+  }
+
+  // Moderation: delete ANY user's message for everyone, then refresh the
+  // list so the deleted label (with the deleter's name) shows at once.
+  // The message's full content stays visible to the admin.
+  async function handleAdminDelete(m: AdminMessage) {
+    if (!selectedConv) return;
+    setDeletingId(m.id);
+    setDeleteError('');
+    try {
+      await deleteMessage(selectedConv.id, m.id, 'everyone');
+      setConfirmDeleteId(null);
+      await loadConvMessages(selectedConv);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Could not delete message');
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  // Moderation from the Media Library: same DELETE endpoint, using the
+  // conversation id the backend now includes on each media item. The item
+  // stays visible to the admin with its "deleted" tag and full download —
+  // only the participants lose it.
+  async function handleMediaDelete(item: AdminMediaItem) {
+    if (item.conversation_id == null) return;
+    setDeletingMediaId(item.id);
+    setMediaDeleteError('');
+    try {
+      await deleteMessage(item.conversation_id, item.id, 'everyone');
+      setConfirmDeleteMediaId(null);
+      // The open viewer keeps showing the item, now marked deleted.
+      if (viewer?.id === item.id) setViewer({ ...viewer, deleted: true });
+      await loadMedia(mediaKind);
+    } catch (err) {
+      setMediaDeleteError(err instanceof Error ? err.message : 'Could not delete media');
+    } finally {
+      setDeletingMediaId(null);
     }
   }
 
@@ -190,6 +243,9 @@ export default function AdminPage() {
     { label: 'Online now', value: stats?.online_now },
     { label: 'Messages today', value: stats?.messages_today },
   ];
+
+  // Resolve "deleted for me" user ids to display names.
+  const userNameById = new Map(users.map((u) => [u.id, u.display_name]));
 
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100">
@@ -346,8 +402,9 @@ export default function AdminPage() {
                     className="rounded-full px-3 py-1 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100">✕ Close</button>
                 </div>
                 <p className="mb-4 inline-block rounded-full bg-brand-500/15 px-3 py-1 text-xs font-semibold text-brand-400">
-                  Admin view — read only
+                  Admin view — you can delete any message for everyone
                 </p>
+                {deleteError && <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{deleteError}</p>}
                 {convLoading && <p className="py-4 text-center text-sm text-zinc-500">Loading messages…</p>}
                 {convError && <p className="py-4 text-center text-sm text-red-300">{convError}</p>}
                 {!convLoading && !convError && convMessages.length === 0 && (
@@ -356,12 +413,55 @@ export default function AdminPage() {
                 <ul className="space-y-3">
                   {convMessages.map((m) => {
                     const src = m.media_url ? mediaUrlFromPath(m.media_url, m.id) : '';
+                    // Call history lines can't be deleted; already-deleted
+                    // messages have nothing left to delete for everyone.
+                    const canDelete = m.kind !== 'call' && !m.deleted_for_everyone;
                     return (
                       <li key={m.id} className="rounded-xl bg-zinc-800/70 px-3 py-2">
-                        <p className="text-xs text-zinc-400">
-                          <span className="font-medium text-zinc-200">{m.sender_name}</span> · {formatMessageTime(m.created_at)}
-                          {m.expired && <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-400">⏱ disappeared from chat</span>}
-                        </p>
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="min-w-0 text-xs text-zinc-400">
+                            <span className="font-medium text-zinc-200">{m.sender_name}</span> · {formatMessageTime(m.created_at)}
+                            {m.expired && <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-400">⏱ disappeared from chat</span>}
+                            {m.deleted_for_everyone && <span className="ml-2 rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-400">{deletedForEveryoneLabel(m, users)}</span>}
+                            {!m.deleted_for_everyone && (m.deleted_for?.length ?? 0) > 0 && (
+                              <span className="ml-2 rounded-full bg-zinc-700 px-2 py-0.5 text-[11px] font-semibold text-zinc-300">
+                                Deleted for me by {(m.deleted_for ?? []).map((id) => userNameById.get(id) ?? `User ${id}`).join(', ')}
+                              </span>
+                            )}
+                            {m.deleted && !m.deleted_for_everyone && (m.deleted_for?.length ?? 0) === 0 && (
+                              <span className="ml-2 rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-400">🚫 Deleted</span>
+                            )}
+                          </p>
+                          {canDelete && (
+                            confirmDeleteId === m.id ? (
+                              <span className="flex shrink-0 items-center gap-1">
+                                <span className="text-xs text-zinc-300">Delete for everyone?</span>
+                                <button
+                                  onClick={() => void handleAdminDelete(m)}
+                                  disabled={deletingId === m.id}
+                                  className="rounded-full bg-red-500 px-2.5 py-0.5 text-xs font-semibold text-white hover:bg-red-400 disabled:opacity-50"
+                                >
+                                  {deletingId === m.id ? 'Deleting…' : 'Delete'}
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  disabled={deletingId === m.id}
+                                  className="rounded-full px-2.5 py-0.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => { setDeleteError(''); setConfirmDeleteId(m.id); }}
+                                title="Delete this message for everyone"
+                                className="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium text-red-300 hover:bg-red-500/10 hover:text-red-200"
+                              >
+                                Delete for everyone
+                              </button>
+                            )
+                          )}
+                        </div>
                         {m.kind === 'text' && <p className="mt-1 whitespace-pre-wrap break-words text-[15px]">{m.content}</p>}
                         {m.kind === 'image' && src && (
                           // eslint-disable-next-line @next/next/no-img-element
@@ -402,6 +502,7 @@ export default function AdminPage() {
             </div>
 
             {mediaLoading && <p className="py-6 text-center text-sm text-zinc-500">Loading media…</p>}
+            {mediaDeleteError && <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{mediaDeleteError}</p>}
             {!mediaLoading && media.length === 0 && (
               <p className="rounded-xl bg-zinc-900 py-10 text-center text-sm text-zinc-500">No media found for this filter.</p>
             )}
@@ -435,11 +536,43 @@ export default function AdminPage() {
                       </p>
                       <p className="mt-0.5 text-xs text-zinc-500">{formatDate(item.created_at)} · {formatBytes(item.size_bytes)}
                         {item.expired && <span className="ml-1.5 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-400">⏱ disappeared</span>}
+                        {item.deleted && <span className="ml-1.5 rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-400">🚫 deleted</span>}
                       </p>
-                      <a href={src} download={item.filename} onClick={(e) => e.stopPropagation()}
-                        className="mt-2 inline-block rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700">
-                        ⬇ Download
-                      </a>
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <a href={src} download={item.filename} onClick={(e) => e.stopPropagation()}
+                          className="inline-block rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700">
+                          ⬇ Download
+                        </a>
+                        {canDeleteAdminMedia(item) && (
+                          confirmDeleteMediaId === item.id ? (
+                            <span className="flex items-center gap-1">
+                              <span className="text-xs text-zinc-300">Delete for everyone?</span>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); void handleMediaDelete(item); }}
+                                disabled={deletingMediaId === item.id}
+                                className="rounded-full bg-red-500 px-2.5 py-0.5 text-xs font-semibold text-white hover:bg-red-400 disabled:opacity-50"
+                              >
+                                {deletingMediaId === item.id ? 'Deleting…' : 'Delete'}
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setConfirmDeleteMediaId(null); }}
+                                disabled={deletingMediaId === item.id}
+                                className="rounded-full px-2.5 py-0.5 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setMediaDeleteError(''); setConfirmDeleteMediaId(item.id); }}
+                              title="Delete this message for everyone"
+                              className="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium text-red-300 hover:bg-red-500/10 hover:text-red-200"
+                            >
+                              Delete for everyone
+                            </button>
+                          )
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -459,6 +592,7 @@ export default function AdminPage() {
                 <p className="text-xs text-zinc-400">
                   From {viewer.sender_name} · {viewer.conversation_participants.join(' & ') || '—'} · {formatDate(viewer.created_at)} · {formatBytes(viewer.size_bytes)}
                   {viewer.expired && <span className="ml-2 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-400">⏱ disappeared from chat</span>}
+                  {viewer.deleted && <span className="ml-2 rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-400">🚫 deleted</span>}
                 </p>
               </div>
               <button onClick={() => setViewer(null)} aria-label="Close viewer"
@@ -474,10 +608,44 @@ export default function AdminPage() {
             {viewer.kind === 'audio' && (
               <audio src={mediaUrlFromPath(viewer.download_url, viewer.id)} controls autoPlay preload="metadata" className="w-full" />
             )}
-            <div className="mt-4 flex justify-end">
+            <div className="mt-4 flex items-center justify-between gap-3">
+              {canDeleteAdminMedia(viewer) ? (
+                confirmDeleteMediaId === viewer.id ? (
+                  <span className="flex items-center gap-2">
+                    <span className="text-sm text-zinc-300">Delete for everyone?</span>
+                    <button
+                      onClick={() => void handleMediaDelete(viewer)}
+                      disabled={deletingMediaId === viewer.id}
+                      className="rounded-full bg-red-500 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-400 disabled:opacity-50"
+                    >
+                      {deletingMediaId === viewer.id ? 'Deleting…' : 'Delete'}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteMediaId(null)}
+                      disabled={deletingMediaId === viewer.id}
+                      className="rounded-full px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => { setMediaDeleteError(''); setConfirmDeleteMediaId(viewer.id); }}
+                    title="Delete this message for everyone"
+                    className="rounded-full px-3 py-1.5 text-sm font-medium text-red-300 hover:bg-red-500/10 hover:text-red-200"
+                  >
+                    Delete for everyone
+                  </button>
+                )
+              ) : (
+                <span />
+              )}
               <a href={mediaUrlFromPath(viewer.download_url, viewer.id)} download={viewer.filename}
                 className="rounded-full bg-brand-500 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-brand-400">⬇ Download</a>
             </div>
+            {mediaDeleteError && confirmDeleteMediaId === viewer.id && (
+              <p className="mt-2 text-sm text-red-400">{mediaDeleteError}</p>
+            )}
           </div>
         </div>
       )}

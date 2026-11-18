@@ -61,6 +61,26 @@ async def broadcast_message(message_dict: dict, participant_ids: list[int]):
     )
 
 
+async def broadcast_message_deleted(
+    conversation_id: int,
+    message_id: int,
+    message_dict: dict,
+    participant_ids: list[int],
+):
+    """Tell every participant a message was deleted for everyone.
+    message_dict is the deleted-placeholder participant view."""
+    await manager.send_to_users(
+        participant_ids,
+        {
+            "type": "message_deleted",
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "mode": "everyone",
+            "message": message_dict,
+        },
+    )
+
+
 async def broadcast_read(conversation_id: int, reader_id: int, participant_ids: list[int]):
     others = [uid for uid in participant_ids if uid != reader_id]
     await manager.send_to_users(
